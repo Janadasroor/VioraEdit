@@ -59,6 +59,22 @@ fun VideoTimeline(
         val trimEndX = (trimEndMs.toFloat() / videoDurationMs.toFloat()) * trackWidth
         val playheadX = (currentPositionMs.toFloat() / videoDurationMs.toFloat()) * trackWidth
         
+        // Draw Thumbnails
+        if (thumbnails.isNotEmpty()) {
+             Row(modifier = Modifier.fillMaxSize()) {
+                thumbnails.forEach { thumbPath ->
+                    coil.compose.AsyncImage(
+                        model = thumbPath,
+                        contentDescription = null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                    )
+                }
+            }
+        }
+
         Canvas(
             modifier = Modifier
                 .fillMaxSize()

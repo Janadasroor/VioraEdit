@@ -314,6 +314,21 @@ fun ColorFilters(
                 }
             )
         }
+
+        item {
+            FilterPresetCard(
+                name = "Vibrant",
+                isApplied = appliedFilters.any { it is VideoFilter.Vibrant },
+                onClick = {
+                    val existing = appliedFilters.find { it is VideoFilter.Vibrant }
+                    if (existing != null) {
+                        onFilterRemoved(existing)
+                    } else {
+                        onFilterAdded(VideoFilter.Vibrant())
+                    }
+                }
+            )
+        }
     }
 }
 

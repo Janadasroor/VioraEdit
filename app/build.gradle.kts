@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
     id("com.google.dagger.hilt.android")
     kotlin("kapt")
 }
@@ -42,6 +43,9 @@ android {
 }
 
 dependencies {
+    // Serialization
+    implementation(libs.kotlinx.serialization.json)
+
     // Hilt Dependency Injection
     kapt("com.google.dagger:hilt-compiler:2.52")
     implementation("com.arthenica:smart-exception-java:0.2.1")

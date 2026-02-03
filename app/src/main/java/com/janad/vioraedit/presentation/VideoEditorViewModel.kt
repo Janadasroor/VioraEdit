@@ -18,10 +18,12 @@ import javax.inject.Inject
 
 @HiltViewModel
 class VideoEditorViewModel @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val draftRepository: com.janad.vioraedit.data.models.DraftRepository
 ) : ViewModel() {
 
     private val videoProcessor = VideoProcessor(context)
+    private val thumbnailGenerator = com.janad.vioraedit.domain.ThumbnailGenerator(context)
 
     // State
     private val _uiState = MutableStateFlow(VideoEditorUiState())
@@ -54,6 +56,8 @@ class VideoEditorViewModel @Inject constructor(
             is VideoEditorIntent.AddAudioTrack -> addAudioTrack(intent.track)
             is VideoEditorIntent.RemoveAudioTrack -> removeAudioTrack(intent.trackId)
             is VideoEditorIntent.UpdateAudioVolume -> updateAudioVolume(intent.trackId, intent.volume)
+            is VideoEditorIntent.UpdateAudioFade -> updateAudioFade(intent.trackId, intent.fadeInMs, intent.fadeOutMs)
+            is VideoEditorIntent.UpdateAudioTiming -> updateAudioTiming(intent.trackId, intent.startTimeMs, intent.sourceStartMs, intent.durationMs)
             is VideoEditorIntent.AddTextOverlay -> addTextOverlay(intent.overlay)
             is VideoEditorIntent.UpdateTextOverlay -> updateTextOverlay(intent.overlay)
             is VideoEditorIntent.RemoveTextOverlay -> removeTextOverlay(intent.overlayId)
@@ -64,12 +68,55 @@ class VideoEditorViewModel @Inject constructor(
             is VideoEditorIntent.ToggleReverse -> toggleReverse()
             is VideoEditorIntent.UpdateCompressionLevel -> updateCompressionLevel(intent.level)
             is VideoEditorIntent.UpdateOutputFormat -> updateOutputFormat(intent.format)
+            is VideoEditorIntent.UpdateCanvasConfig -> updateCanvasConfig(intent.config)
             is VideoEditorIntent.ExportVideo -> exportVideo()
             is VideoEditorIntent.UpdatePlaybackPosition -> _playbackPosition.value = intent.positionMs
             is VideoEditorIntent.QuickTrim -> quickTrim(intent.startMs, intent.endMs)
             is VideoEditorIntent.ApplyChangesDirectly -> applyChangesDirectly()
             is VideoEditorIntent.Undo -> undo()
             is VideoEditorIntent.Redo -> redo()
+            is VideoEditorIntent.SaveDraft -> saveDraft()
+            is VideoEditorIntent.LoadDraft -> loadDraft(intent.state)
+        }
+    }
+
+    private fun loadDraft(state: VideoEditState) {
+        viewModelScope.launch {
+            _uiState.update { 
+                it.copy(
+                    editState = state,
+                    isLoading = false,
+                    canUndo = false,
+                    canRedo = false
+                ) 
+            }
+            
+            // Refresh thumbnails for the loaded video
+            launch {
+                val thumbs = thumbnailGenerator.generateThumbnails(state.videoUri, 10)
+                _uiState.update { it.copy(thumbnails = thumbs) }
+            }
+            
+            // Re-take permission if possible (in case it was lost, though unlikely for internal drafts if using persisted URIs)
+            try {
+                takePersistableUriPermission(Uri.parse(state.videoUri))
+            } catch (e: Exception) {
+                Timber.w("Could not take permission for draft video: ${state.videoUri}")
+            }
+        }
+    }
+
+    private fun saveDraft() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isProcessing = true) }
+            val success = draftRepository.saveDraft(_uiState.value.editState)
+            _uiState.update { it.copy(isProcessing = false) }
+            
+            if (success) {
+                _events.emit(VideoEditorEvent.DraftSaved)
+            } else {
+                _events.emit(VideoEditorEvent.Error("Failed to save draft"))
+            }
         }
     }
 
@@ -110,6 +157,13 @@ class VideoEditorViewModel @Inject constructor(
                         canRedo = false
                     )
                 }
+                
+                // Generate thumbnails in background
+                launch {
+                    val thumbs = thumbnailGenerator.generateThumbnails(uriString, 10)
+                    _uiState.update { it.copy(thumbnails = thumbs) }
+                }
+
                 Timber.d("Video loaded: ${uiState.value.editState.videoUri}")
                 _events.emit(VideoEditorEvent.VideoLoaded(uriString))
             } catch (e: Exception) {
@@ -373,6 +427,35 @@ class VideoEditorViewModel @Inject constructor(
         }
     }
 
+    private fun updateAudioTiming(trackId: String, startTimeMs: Long, sourceStartMs: Long, durationMs: Long) {
+        _uiState.update {
+            val tracks = it.editState.audioTracks.map { track ->
+                if (track.id == trackId) {
+                    track.copy(
+                        startTimeMs = startTimeMs,
+                        sourceStartMs = sourceStartMs,
+                        endTimeMs = startTimeMs + durationMs
+                    )
+                } else track
+            }
+            it.copy(editState = it.editState.copy(audioTracks = tracks))
+        }
+    }
+
+    private fun updateAudioFade(trackId: String, fadeInMs: Long, fadeOutMs: Long) {
+        _uiState.update {
+            val tracks = it.editState.audioTracks.map { track ->
+                if (track.id == trackId) {
+                    track.copy(
+                        fadeInMs = fadeInMs,
+                        fadeOutMs = fadeOutMs
+                    )
+                } else track
+            }
+            it.copy(editState = it.editState.copy(audioTracks = tracks))
+        }
+    }
+
     private fun addTextOverlay(overlay: TextOverlay) {
         val newOverlay = overlay.copy(id = UUID.randomUUID().toString())
         _uiState.update {
@@ -454,6 +537,12 @@ class VideoEditorViewModel @Inject constructor(
     private fun updateOutputFormat(format: OutputFormat) {
         _uiState.update {
             it.copy(editState = it.editState.copy(outputFormat = format))
+        }
+    }
+
+    private fun updateCanvasConfig(config: CanvasConfig) {
+        _uiState.update {
+            it.copy(editState = it.editState.copy(canvasConfig = config))
         }
     }
 
@@ -550,7 +639,8 @@ data class VideoEditorUiState(
     val processingProgress: ProcessingProgress = ProcessingProgress(),
     val isPlaying: Boolean = false,
     val canUndo: Boolean = false,
-    val canRedo: Boolean = false
+    val canRedo: Boolean = false,
+    val thumbnails: List<String> = emptyList()
 )
 
 // Intents
@@ -564,6 +654,8 @@ sealed class VideoEditorIntent {
     data class AddAudioTrack(val track: AudioTrack) : VideoEditorIntent()
     data class RemoveAudioTrack(val trackId: String) : VideoEditorIntent()
     data class UpdateAudioVolume(val trackId: String, val volume: Float) : VideoEditorIntent()
+    data class UpdateAudioTiming(val trackId: String, val startTimeMs: Long, val sourceStartMs: Long, val durationMs: Long) : VideoEditorIntent()
+    data class UpdateAudioFade(val trackId: String, val fadeInMs: Long, val fadeOutMs: Long) : VideoEditorIntent()
     data class AddTextOverlay(val overlay: TextOverlay) : VideoEditorIntent()
     data class UpdateTextOverlay(val overlay: TextOverlay) : VideoEditorIntent()
     data class RemoveTextOverlay(val overlayId: String) : VideoEditorIntent()
@@ -574,12 +666,15 @@ sealed class VideoEditorIntent {
     data object ToggleReverse : VideoEditorIntent()
     data class UpdateCompressionLevel(val level: CompressionLevel) : VideoEditorIntent()
     data class UpdateOutputFormat(val format: OutputFormat) : VideoEditorIntent()
+    data class UpdateCanvasConfig(val config: CanvasConfig) : VideoEditorIntent()
     data object ExportVideo : VideoEditorIntent()
     data class UpdatePlaybackPosition(val positionMs: Long) : VideoEditorIntent()
     data class QuickTrim(val startMs: Long, val endMs: Long) : VideoEditorIntent()
     data object ApplyChangesDirectly : VideoEditorIntent()
     data object Undo : VideoEditorIntent()
     data object Redo : VideoEditorIntent()
+    data object SaveDraft : VideoEditorIntent()
+    data class LoadDraft(val state: VideoEditState) : VideoEditorIntent()
 }
 
 // Events
@@ -587,6 +682,7 @@ sealed class VideoEditorEvent {
     data class VideoLoaded(val uri: String) : VideoEditorEvent()
     data class ExportCompleted(val outputPath: String) : VideoEditorEvent()
     data class ChangesApplied(val outputPath: String) : VideoEditorEvent()
+    data object DraftSaved : VideoEditorEvent()
     data object UndoCompleted : VideoEditorEvent()
     data object RedoCompleted : VideoEditorEvent()
     data class Error(val message: String) : VideoEditorEvent()

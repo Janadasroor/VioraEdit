@@ -26,7 +26,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.janad.vioraedit.data.models.StickerOverlay
 import com.janad.vioraedit.data.models.TextOverlay
+import coil.compose.AsyncImage
+import androidx.compose.ui.layout.ContentScale
 import kotlin.math.atan2
+
 import kotlin.math.sqrt
 
 /**
@@ -157,18 +160,29 @@ fun DraggableStickerOverlay(
                 } else Modifier
             )
     ) {
-        // Sticker image would be loaded here
+        // Sticker Content
         Box(
             modifier = Modifier
-                .size((100 * scale).dp)
-                .background(Color.LightGray, RoundedCornerShape(8.dp)),
+                .size((100 * scale).dp),
+                //.background(Color.LightGray, RoundedCornerShape(8.dp)), // Removed background for transparent stickers
             contentAlignment = Alignment.Center
         ) {
-            Icon(
-                imageVector = Icons.Default.Image,
-                contentDescription = "Sticker",
-                modifier = Modifier.size((50 * scale).dp)
-            )
+            val isUri = overlay.imageUri.startsWith("content://") || overlay.imageUri.startsWith("file://")
+            
+            if (isUri) {
+                AsyncImage(
+                    model = overlay.imageUri,
+                    contentDescription = "Sticker",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+            } else {
+                // Assume it's an emoji
+                Text(
+                    text = overlay.imageUri,
+                    fontSize = (50 * scale).sp
+                )
+            }
         }
         
         // Scale handle when selected
@@ -355,53 +369,7 @@ fun TextOverlayEditorPanel(
     }
 }
 
-/**
- * Sticker picker panel
- */
-@Composable
-fun StickerPickerPanel(
-    onStickerSelected: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(16.dp)
-    ) {
-        Text(
-            text = "Stickers",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(bottom = 12.dp)
-        )
-        
-        // Grid of stickers
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            items(20) { index ->
-                Surface(
-                    modifier = Modifier
-                        .size(80.dp)
-                        .pointerInput(Unit) {
-                            detectTapGestures {
-                                onStickerSelected("sticker_$index")
-                            }
-                        },
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Default.Image,
-                            contentDescription = "Sticker $index",
-                            modifier = Modifier.size(40.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
+
 
 private val predefinedColors = listOf(
     Color.White,

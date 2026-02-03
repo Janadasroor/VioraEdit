@@ -27,8 +27,39 @@ fun AudioEditorPanel(
     onRemoveAudioTrack: (String) -> Unit,
     onUpdateVolume: (String, Float) -> Unit,
     onUpdateFade: (String, Long, Long) -> Unit,
+    onUpdateTiming: (String, Long, Long, Long) -> Unit, // id, start, sourceStart, duration
+    onRecordVoiceover: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showVoiceoverDialog by remember { mutableStateOf(false) }
+
+    if (showVoiceoverDialog) {
+        VoiceoverRecorderDialog(
+            onDismiss = { showVoiceoverDialog = false },
+            onRecordingCompleted = { path ->
+                onRecordVoiceover(path)
+                showVoiceoverDialog = false
+            }
+        )
+    }
+
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val audioPickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri: android.net.Uri? ->
+        uri?.let {
+            onAddAudioTrack(
+                AudioTrack(
+                    id = UUID.randomUUID().toString(),
+                    uri = it.toString(),
+                    startTimeMs = 0L,
+                    endTimeMs = videoDurationMs, // Default to full duration
+                    volume = 0.5f // Default volume
+                )
+            )
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -46,13 +77,26 @@ fun AudioEditorPanel(
                 style = MaterialTheme.typography.titleMedium
             )
             
-            Button(
-                onClick = { /* Open audio file picker */ },
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Add Music")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Record Button
+                Button(
+                    onClick = { showVoiceoverDialog = true },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                ) {
+                    Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Voiceover")
+                }
+
+                Button(
+                    onClick = { audioPickerLauncher.launch("audio/*") },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add Music")
+                }
             }
         }
         
@@ -86,9 +130,11 @@ fun AudioEditorPanel(
                 items(audioTracks) { track ->
                     AudioTrackItem(
                         track = track,
+                        videoDurationMs = videoDurationMs,
                         onRemove = { onRemoveAudioTrack(track.id) },
                         onVolumeChange = { volume -> onUpdateVolume(track.id, volume) },
-                        onFadeChange = { fadeIn, fadeOut -> onUpdateFade(track.id, fadeIn, fadeOut) }
+                        onFadeChange = { fadeIn, fadeOut -> onUpdateFade(track.id, fadeIn, fadeOut) },
+                        onTimingChange = { start, sourceStart, duration -> onUpdateTiming(track.id, start, sourceStart, duration) }
                     )
                 }
             }
@@ -99,15 +145,22 @@ fun AudioEditorPanel(
 @Composable
 fun AudioTrackItem(
     track: AudioTrack,
+    videoDurationMs: Long,
     onRemove: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     onFadeChange: (Long, Long) -> Unit,
+    onTimingChange: (Long, Long, Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
     var volume by remember { mutableStateOf(track.volume) }
     var fadeInMs by remember { mutableStateOf(track.fadeInMs) }
     var fadeOutMs by remember { mutableStateOf(track.fadeOutMs) }
+    
+    // Timing state
+    var startTimeMs by remember { mutableStateOf(track.startTimeMs) }
+    var sourceStartMs by remember { mutableStateOf(track.sourceStartMs) }
+    var durationMs by remember { mutableStateOf(track.endTimeMs - track.startTimeMs) }
     
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -135,12 +188,12 @@ fun AudioTrackItem(
                     
                     Column {
                         Text(
-                            text = if (track.isOriginalAudio) "Original Audio" else "Background Music",
+                            text = if (track.isOriginalAudio) "Original Audio" else "Track ${track.id.takeLast(4)}",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
                         )
                         Text(
-                            text = "${formatTime(track.startTimeMs)} - ${formatTime(track.endTimeMs)}",
+                            text = "${formatTime(startTimeMs)} - ${formatTime(startTimeMs + durationMs)}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -176,6 +229,44 @@ fun AudioTrackItem(
             // Expanded controls
             if (expanded) {
                 Divider()
+                
+                if (!track.isOriginalAudio) {
+                    Text("Timing", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    
+                    // Start Position on Timeline
+                    Column {
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text("Start Time", style = MaterialTheme.typography.bodySmall)
+                            Text(formatTime(startTimeMs), style = MaterialTheme.typography.bodySmall)
+                        }
+                        Slider(
+                            value = startTimeMs.toFloat(),
+                            onValueChange = { 
+                                startTimeMs = it.toLong()
+                                onTimingChange(startTimeMs, sourceStartMs, durationMs)
+                            },
+                            valueRange = 0f..videoDurationMs.toFloat()
+                        )
+                    }
+                    
+                    // Source Trim (Start offset in the file)
+                    Column {
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text("Trim Start (Skip Intro)", style = MaterialTheme.typography.bodySmall)
+                            Text(formatTime(sourceStartMs), style = MaterialTheme.typography.bodySmall)
+                        }
+                        Slider(
+                            value = sourceStartMs.toFloat(),
+                            onValueChange = { 
+                                sourceStartMs = it.toLong()
+                                onTimingChange(startTimeMs, sourceStartMs, durationMs)
+                            },
+                            valueRange = 0f..60000f // Assume max 60s offset for UI simplicity
+                        )
+                    }
+                    
+                    Divider()
+                }
                 
                 // Volume control
                 Column {
@@ -333,4 +424,92 @@ private fun formatTime(milliseconds: Long): String {
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     return String.format("%d:%02d", minutes, seconds)
+}
+
+@Composable
+fun VoiceoverRecorderDialog(
+    onDismiss: () -> Unit,
+    onRecordingCompleted: (String) -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val recorder = remember { com.janad.vioraedit.domain.AudioRecorder(context) }
+    var isRecording by remember { mutableStateOf(false) }
+    var recordingDuration by remember { mutableStateOf(0L) }
+    
+    // Timer effect
+    LaunchedEffect(isRecording) {
+        if (isRecording) {
+            val startTime = System.currentTimeMillis()
+            while (isRecording) {
+                recordingDuration = System.currentTimeMillis() - startTime
+                kotlinx.coroutines.delay(100)
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { 
+            if (isRecording) {
+                recorder.cancelRecording()
+            }
+            onDismiss()
+        },
+        title = { Text("Record Voiceover") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = formatTime(recordingDuration),
+                    style = MaterialTheme.typography.displayMedium,
+                    color = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                )
+                
+                if (isRecording) {
+                    Text("Recording...", color = MaterialTheme.colorScheme.error)
+                } else {
+                    Text("Tap mic to start")
+                }
+            }
+        },
+        confirmButton = {
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                FloatingActionButton(
+                    onClick = {
+                        if (isRecording) {
+                            val path = recorder.stopRecording()
+                            isRecording = false
+                            if (path != null) {
+                                onRecordingCompleted(path)
+                            }
+                        } else {
+                            recorder.startRecording()
+                            isRecording = true
+                        }
+                    },
+                    containerColor = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(72.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
+                        contentDescription = if (isRecording) "Stop" else "Record",
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+        },
+        dismissButton = {
+             TextButton(onClick = {
+                 if (isRecording) recorder.cancelRecording()
+                 onDismiss() 
+             }) {
+                 Text("Cancel")
+             }
+        }
+    )
 }

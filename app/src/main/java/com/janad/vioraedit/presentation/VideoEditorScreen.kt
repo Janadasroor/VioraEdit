@@ -23,6 +23,15 @@ import com.janad.vioraedit.presentation.components.StickerPickerPanel
 import com.janad.vioraedit.presentation.components.TextOverlayEditorPanel
 import com.janad.vioraedit.presentation.components.VideoPlayerComposable
 import com.janad.vioraedit.presentation.components.VideoTimeline
+import com.janad.vioraedit.presentation.components.CanvasPanel
+import com.janad.vioraedit.presentation.components.StickerEditorPanel
+import com.janad.vioraedit.presentation.components.VideoEditorTopBar
+import com.janad.vioraedit.presentation.components.TrimPanel
+import com.janad.vioraedit.presentation.components.SpeedPanel
+import com.janad.vioraedit.presentation.components.ProcessingOverlay
+import com.janad.vioraedit.presentation.components.ExportDialog
+import com.janad.vioraedit.presentation.components.EditorTab
+import com.janad.vioraedit.presentation.components.EditorTabRow
 import timber.log.Timber
 
 
@@ -72,13 +81,23 @@ fun VideoEditorScreen(
         }
     }
 
+    // Share helper
+    val shareHelper = remember { com.janad.vioraedit.presentation.utils.VideoShareHelper(context) }
+
     // Handle events
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
             when (event) {
                 is VideoEditorEvent.ExportCompleted -> {
                     onExportComplete(event.outputPath)
-                    snackbarHostState.showSnackbar("Video exported successfully")
+                    val result = snackbarHostState.showSnackbar(
+                        message = "Video exported successfully",
+                        actionLabel = "Share",
+                        duration = SnackbarDuration.Long
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        shareHelper.shareVideo(event.outputPath)
+                    }
                 }
                 is VideoEditorEvent.ChangesApplied -> {
                     hasUnappliedChanges = false
@@ -106,6 +125,7 @@ fun VideoEditorScreen(
                 onApplyChanges = { showApplyConfirmDialog = true },
                 onUndo = { viewModel.onIntent(VideoEditorIntent.Undo) },
                 onRedo = { viewModel.onIntent(VideoEditorIntent.Redo) },
+                onSaveDraft = { viewModel.onIntent(VideoEditorIntent.SaveDraft) },
                 canUndo = uiState.canUndo,
                 canRedo = uiState.canRedo,
                 isProcessing = uiState.isProcessing,
@@ -121,6 +141,7 @@ fun VideoEditorScreen(
                     trimStartMs = uiState.editState.trimRange.startMs,
                     trimEndMs = uiState.editState.trimRange.endMs,
                     currentPositionMs = playbackPosition,
+                    thumbnails = uiState.thumbnails,
                     onTrimChanged = { start, end ->
                         viewModel.onIntent(VideoEditorIntent.UpdateTrimRange(start, end))
                         hasUnappliedChanges = true
@@ -252,6 +273,15 @@ fun VideoEditorScreen(
                             }
                         )
                     }
+                    EditorTab.CANVAS -> {
+                        CanvasPanel(
+                            config = uiState.editState.canvasConfig,
+                            onConfigChanged = { config ->
+                                viewModel.onIntent(VideoEditorIntent.UpdateCanvasConfig(config))
+                                hasUnappliedChanges = true
+                            }
+                        )
+                    }
                     EditorTab.FILTERS -> {
                         FiltersPanel(
                             appliedFilters = uiState.editState.filters,
@@ -286,7 +316,27 @@ fun VideoEditorScreen(
                                 hasUnappliedChanges = true
                             },
                             onUpdateFade = { trackId, fadeIn, fadeOut ->
-                                // Update audio track with fade
+                                viewModel.onIntent(VideoEditorIntent.UpdateAudioFade(trackId, fadeIn, fadeOut))
+                                hasUnappliedChanges = true
+                            },
+                            onUpdateTiming = { trackId, start, sourceStart, duration ->
+                                viewModel.onIntent(VideoEditorIntent.UpdateAudioTiming(trackId, start, sourceStart, duration))
+                                hasUnappliedChanges = true
+                            },
+
+                            onRecordVoiceover = { path ->
+                                // Add voiceover as a new audio track
+                                viewModel.onIntent(
+                                    VideoEditorIntent.AddAudioTrack(
+                                        AudioTrack(
+                                            id = java.util.UUID.randomUUID().toString(),
+                                            uri = android.net.Uri.fromFile(java.io.File(path)).toString(),
+                                            startTimeMs = playbackPosition, // Start at current playback position
+                                            endTimeMs = uiState.editState.videoDurationMs, // Default to end (will be clipped by file length in reality)
+                                            volume = 1.0f // Default loud for voiceover
+                                        )
+                                    )
+                                )
                                 hasUnappliedChanges = true
                             }
                         )
@@ -313,22 +363,56 @@ fun VideoEditorScreen(
                         )
                     }
                     EditorTab.STICKERS -> {
-                        StickerPickerPanel(
-                            onStickerSelected = { stickerUri ->
-                                viewModel.onIntent(
-                                    VideoEditorIntent.AddStickerOverlay(
-                                        StickerOverlay(
-                                            id = "",
-                                            imageUri = stickerUri,
-                                            position = androidx.compose.ui.geometry.Offset(100f, 100f),
-                                            startTimeMs = playbackPosition,
-                                            endTimeMs = uiState.editState.videoDurationMs
+                        if (selectedStickerOverlay != null) {
+                            StickerEditorPanel(
+                                selectedSticker = selectedStickerOverlay!!,
+                                onUpdateSticker = { sticker ->
+                                    viewModel.onIntent(VideoEditorIntent.UpdateStickerOverlay(sticker))
+                                    selectedStickerOverlay = sticker // Update selection reference
+                                    hasUnappliedChanges = true
+                                },
+                                onDeleteSticker = {
+                                    viewModel.onIntent(VideoEditorIntent.RemoveStickerOverlay(selectedStickerOverlay!!.id))
+                                    selectedStickerOverlay = null
+                                    hasUnappliedChanges = true
+                                }
+                            )
+                        } else {
+                            StickerPickerPanel(
+                                onStickerSelected = { stickerUri ->
+                                    if (stickerUri.startsWith("content://") || stickerUri.startsWith("file://")) {
+                                        // Image Sticker
+                                        viewModel.onIntent(
+                                            VideoEditorIntent.AddStickerOverlay(
+                                                StickerOverlay(
+                                                    id = "",
+                                                    imageUri = stickerUri,
+                                                    position = androidx.compose.ui.geometry.Offset(300f, 300f),
+                                                    scale = 0.5f,
+                                                    startTimeMs = playbackPosition,
+                                                    endTimeMs = uiState.editState.videoDurationMs
+                                                )
+                                            )
                                         )
-                                    )
-                                )
-                                hasUnappliedChanges = true
-                            }
-                        )
+                                    } else {
+                                        // Emoji Sticker (TextOverlay)
+                                        viewModel.onIntent(
+                                            VideoEditorIntent.AddTextOverlay(
+                                                TextOverlay(
+                                                    id = "", // UUID generated in ViewModel
+                                                    text = stickerUri,
+                                                    position = androidx.compose.ui.geometry.Offset(200f, 200f),
+                                                    fontSize = 100f, // Large size for "sticker" look
+                                                    startTimeMs = playbackPosition,
+                                                    endTimeMs = uiState.editState.videoDurationMs
+                                                )
+                                            )
+                                        )
+                                    }
+                                    hasUnappliedChanges = true
+                                }
+                            )
+                        }
                     }
                     EditorTab.SPEED -> {
                         SpeedPanel(
@@ -388,326 +472,4 @@ fun VideoEditorScreen(
             }
         )
     }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun VideoEditorTopBar(
-    onClose: () -> Unit,
-    onExport: () -> Unit,
-    onApplyChanges: () -> Unit,
-    onUndo: () -> Unit,
-    onRedo: () -> Unit,
-    canUndo: Boolean,
-    canRedo: Boolean,
-    isProcessing: Boolean,
-    hasUnappliedChanges: Boolean,
-    modifier: Modifier = Modifier
-) {
-    TopAppBar(
-        title = {
-           // Text("Video Editor")
-                },
-        navigationIcon = {
-            IconButton(onClick = onClose) {
-                Icon(Icons.Default.Close, contentDescription = "Close")
-            }
-        },
-        actions = {
-            // Undo button
-            IconButton(
-                onClick = onUndo,
-                enabled = canUndo && !isProcessing
-            ) {
-                Icon(
-                    Icons.Default.Undo,
-                    contentDescription = "Undo",
-                    tint = if (canUndo && !isProcessing) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                    }
-                )
-            }
-
-            // Redo button
-            IconButton(
-                onClick = onRedo,
-                enabled = canRedo && !isProcessing
-            ) {
-                Icon(
-                    Icons.Default.Redo,
-                    contentDescription = "Redo",
-                    tint = if (canRedo && !isProcessing) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                    }
-                )
-            }
-
-            Spacer(Modifier.width(8.dp))
-
-            // Apply changes button
-            Button(
-                onClick = onApplyChanges,
-                enabled = !isProcessing && hasUnappliedChanges,
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (hasUnappliedChanges) {
-                        MaterialTheme.colorScheme.tertiary
-                    } else {
-                        MaterialTheme.colorScheme.surface
-                    }
-                )
-            ) {
-                Icon(
-                    Icons.Default.Check,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(Modifier.width(4.dp))
-                Text("Apply")
-            }
-
-            Spacer(Modifier.width(8.dp))
-
-            // Export button
-            Button(
-                onClick = onExport,
-                enabled = !isProcessing,
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Icon(
-                    Icons.Default.FileDownload,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(Modifier.width(4.dp))
-                Text("Export")
-            }
-        },
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        modifier = modifier
-    )
-}
-
-@Composable
-fun EditorTabRow(
-    selectedTab: EditorTab,
-    onTabSelected: (EditorTab) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    ScrollableTabRow(
-        selectedTabIndex = selectedTab.ordinal,
-        modifier = modifier.fillMaxWidth(),
-        edgePadding = 8.dp
-    ) {
-        EditorTab.values().forEach { tab ->
-            Tab(
-                selected = selectedTab == tab,
-                onClick = { onTabSelected(tab) },
-                text = { Text(tab.title) },
-                icon = {
-                    Icon(
-                        imageVector = tab.icon,
-                        contentDescription = tab.title,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            )
-        }
-    }
-}
-
-@Composable
-fun TrimPanel(
-    aspectRatio: AspectRatio,
-    onAspectRatioChanged: (AspectRatio) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Text(
-            text = "Crop Aspect Ratio",
-            style = MaterialTheme.typography.titleMedium
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            AspectRatio.values().forEach { ratio ->
-                FilterChip(
-                    selected = aspectRatio == ratio,
-                    onClick = { onAspectRatioChanged(ratio) },
-                    label = { Text(ratio.ratio) },
-                    leadingIcon = if (aspectRatio == ratio) {
-                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
-                    } else null
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun SpeedPanel(
-    playbackSpeed: Float,
-    isReversed: Boolean,
-    onSpeedChanged: (Float) -> Unit,
-    onReverseToggle: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Text(
-            text = "Playback Speed",
-            style = MaterialTheme.typography.titleMedium
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            listOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { speed ->
-                FilterChip(
-                    selected = playbackSpeed == speed,
-                    onClick = { onSpeedChanged(speed) },
-                    label = { Text("${speed}x") }
-                )
-            }
-        }
-
-        HorizontalDivider()
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Reverse Video",
-                style = MaterialTheme.typography.bodyLarge
-            )
-
-            Switch(
-                checked = isReversed,
-                onCheckedChange = { onReverseToggle() }
-            )
-        }
-    }
-}
-
-@Composable
-fun ProcessingOverlay(
-    progress: ProcessingProgress,
-    modifier: Modifier = Modifier
-) {
-    Box(
-        modifier = modifier
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            CircularProgressIndicator(
-                progress = { progress.progress },
-                modifier = Modifier.size(64.dp),
-                strokeWidth = 6.dp
-            )
-
-            Text(
-                text = progress.currentOperation.name.replace("_", " "),
-                style = MaterialTheme.typography.titleMedium
-            )
-
-            Text(
-                text = "${(progress.progress * 100).toInt()}%",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.primary
-            )
-        }
-    }
-}
-
-@Composable
-fun ExportDialog(
-    currentSettings: VideoEditState,
-    onDismiss: () -> Unit,
-    onExport: (CompressionLevel, OutputFormat) -> Unit
-) {
-    var selectedCompression by remember { mutableStateOf(currentSettings.compressionLevel) }
-    var selectedFormat by remember { mutableStateOf(currentSettings.outputFormat) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Export Video") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("Compression Quality", style = MaterialTheme.typography.titleSmall)
-                CompressionLevel.values().forEach { level ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        RadioButton(
-                            selected = selectedCompression == level,
-                            onClick = { selectedCompression = level }
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(level.name)
-                    }
-                }
-
-                HorizontalDivider()
-
-                Text("Output Format", style = MaterialTheme.typography.titleSmall)
-                OutputFormat.values().forEach { format ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        RadioButton(
-                            selected = selectedFormat == format,
-                            onClick = { selectedFormat = format }
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(format.extension.uppercase())
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = { onExport(selectedCompression, selectedFormat) }) {
-                Text("Export")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
-    )
-}
-
-enum class EditorTab(val title: String, val icon: ImageVector) {
-    TRIM("Trim", Icons.Default.ContentCut),
-    FILTERS("Filters", Icons.Default.FilterAlt),
-    AUDIO("Audio", Icons.Default.MusicNote),
-    TEXT("Text", Icons.Default.TextFields),
-    STICKERS("Stickers", Icons.Default.AddPhotoAlternate),
-    SPEED("Speed", Icons.Default.Speed)
 }
